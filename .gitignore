@@ -1,0 +1,12 @@
+.env
+.env.*
+*.local
+
+# Captured course pages can contain user ids, course ids, and signing secrets.
+course.js
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
