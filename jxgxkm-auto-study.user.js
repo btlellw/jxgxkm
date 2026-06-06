@@ -1668,8 +1668,78 @@
     return null;
   }
 
+  function normalizeQuestionForMatch(text) {
+    return normalizeText(text)
+      .replace(/^(?:第\s*)?\d+\s*[、.．)\uff09-]\s*/, '')
+      .replace(/\s+/g, '')
+      .trim();
+  }
+
+  function normalizeOptionForMatch(text) {
+    return normalizeText(text)
+      .replace(RE.optionPrefix, '')
+      .replace(/^(?:[A-H]|[0-9]+)\s*[、.．)\uff09-]\s*/i, '')
+      .replace(/\s+/g, '')
+      .trim();
+  }
+
   function getQuestionKey(questionData) {
+    const question = normalizeQuestionForMatch(questionData.text);
+    const options = questionData.options
+      .map(option => normalizeOptionForMatch(option.text || option.value || ''))
+      .filter(Boolean)
+      .sort()
+      .join('|');
+    return md5(`${question}\n${options}`);
+  }
+
+  function answersToOptionTexts(questionData, answers) {
+    const options = questionData.options.map(option => option.text || option.value || '');
+    const texts = [];
+    for (const answer of answers || []) {
+      const answerText = String(answer).trim();
+      const numericIndex = Number(answerText);
+      const answerIndex = Number.isInteger(numericIndex) ? numericIndex : -1;
+      const letterIndex = /^[A-Z]$/i.test(answerText) ? answerText.toUpperCase().charCodeAt(0) - 65 : -1;
+      const matchedIndex = options.findIndex((text, index) => {
+        const normalized = normalizeOptionForMatch(text);
+        const normalizedAnswer = normalizeOptionForMatch(answerText);
+        return index === answerIndex ||
+          index === letterIndex ||
+          normalizedAnswer === normalized ||
+          (normalizedAnswer.length > 1 && normalized.includes(normalizedAnswer));
+      });
+      const text = matchedIndex >= 0 ? options[matchedIndex] : answerText;
+      if (text) texts.push(text);
+    }
+    return [...new Set(texts.map(normalizeText).filter(Boolean))];
+  }
+
+  function getLegacyQuestionKey(questionData) {
     return md5(`${questionData.text}\n${questionData.options.map(option => option.text).join('|')}`);
+  }
+
+  function getQuestionMatchSignature(question, options) {
+    const normalizedQuestion = normalizeQuestionForMatch(question);
+    const normalizedOptions = (options || [])
+      .map(option => normalizeOptionForMatch(option))
+      .filter(Boolean)
+      .sort()
+      .join('|');
+    return `${normalizedQuestion}\n${normalizedOptions}`;
+  }
+
+  function bankItemToAnswerTexts(item) {
+    if (item?.answerTexts?.length) return item.answerTexts;
+    const options = item?.options || [];
+    return (item?.answers || []).map(answer => {
+      const answerText = String(answer).trim();
+      const numericIndex = Number(answerText);
+      const answerIndex = Number.isInteger(numericIndex) ? numericIndex : -1;
+      const letterIndex = /^[A-Z]$/i.test(answerText) ? answerText.toUpperCase().charCodeAt(0) - 65 : -1;
+      const optionText = answerIndex >= 0 ? options[answerIndex] : options[letterIndex];
+      return optionText || answerText;
+    }).filter(Boolean);
   }
 
   function loadQuestionBank() {
@@ -1686,17 +1756,33 @@
   }
 
   function getBankAnswers(questionData) {
-    const item = loadQuestionBank()[getQuestionKey(questionData)];
-    return item?.answers || null;
+    const bank = loadQuestionBank();
+    const item = bank[getQuestionKey(questionData)] || bank[getLegacyQuestionKey(questionData)];
+    if (item) return bankItemToAnswerTexts(item);
+
+    const currentSignature = getQuestionMatchSignature(
+      questionData.text,
+      questionData.options.map(option => option.text || option.value || '')
+    );
+    const matched = Object.values(bank).find(value => {
+      const question = value?.rawQuestion || value?.question || '';
+      const options = value?.options || value?.normalizedOptions || [];
+      return getQuestionMatchSignature(question, options) === currentSignature;
+    });
+    return matched ? bankItemToAnswerTexts(matched) : null;
   }
 
   function putBankAnswers(questionData, answers, source = 'result') {
     if (!CFG.saveQuestionBank || !answers || !answers.length) return false;
     const bank = loadQuestionBank();
+    const answerTexts = answersToOptionTexts(questionData, answers);
     bank[getQuestionKey(questionData)] = {
-      question: questionData.text,
+      question: normalizeQuestionForMatch(questionData.text),
+      rawQuestion: questionData.text,
       options: questionData.options.map(option => option.text),
+      normalizedOptions: questionData.options.map(option => normalizeOptionForMatch(option.text)),
       answers,
+      answerTexts,
       source,
       savedAt: new Date().toISOString(),
     };
@@ -1717,11 +1803,15 @@
     if (!answers || !answers.length) return false;
     const key = getQuestionKey(questionData);
     const pending = loadPendingExamAnswers().filter(item => item.key !== key);
+    const answerTexts = answersToOptionTexts(questionData, answers);
     pending.push({
       key,
-      question: questionData.text,
+      question: normalizeQuestionForMatch(questionData.text),
+      rawQuestion: questionData.text,
       options: questionData.options.map(option => option.text),
+      normalizedOptions: questionData.options.map(option => normalizeOptionForMatch(option.text)),
       answers,
+      answerTexts,
       savedAt: new Date().toISOString(),
     });
     GM_setValue('pendingExamAnswers', JSON.stringify(pending));
@@ -1737,8 +1827,11 @@
     for (const item of pending) {
       bank[item.key] = {
         question: item.question,
+        rawQuestion: item.rawQuestion || item.question,
         options: item.options,
+        normalizedOptions: item.normalizedOptions || (item.options || []).map(normalizeOptionForMatch),
         answers: item.answers,
+        answerTexts: item.answerTexts || item.answers,
         source: 'passed_exam',
         savedAt: new Date().toISOString(),
       };
@@ -1834,12 +1927,16 @@
 
       const matched = optionElements.find((option, index) => {
         const cleanText = option.text.replace(RE.optionPrefix, '').trim();
+        const normalizedOption = normalizeOptionForMatch(option.text);
+        const normalizedAnswer = normalizeOptionForMatch(answerText);
         return index === answerIndex ||
           index === letterIndex ||
           option.input.value === answerText ||
           option.value === answerText ||
           option.text.includes(answerText) ||
-          cleanText === answerText;
+          cleanText === answerText ||
+          (normalizedAnswer && normalizedOption === normalizedAnswer) ||
+          (normalizedAnswer.length > 1 && normalizedOption.includes(normalizedAnswer));
       });
 
       if (matched && !matched.input.checked) {
@@ -1898,7 +1995,7 @@
       if (!questionData || !questionTextLooksValid(questionData)) continue;
 
       const answers = questionData.inputs
-        .map((input, index) => input.checked ? String.fromCharCode(65 + index) : null)
+        .map((input, index) => input.checked ? (questionData.options[index]?.text || String.fromCharCode(65 + index)) : null)
         .filter(Boolean);
       if (answers.length && savePendingExamAnswer(questionData, answers)) saved += 1;
     }
