@@ -7,6 +7,7 @@
 // @match        https://*/train/courseware/cc*
 // @match        http://*/train/courseware/cc*
 // @match        *://jxgxkm.wsglw.net/*
+// @icon         https://www.google.com/s2/favicons?domain=91huayi.com
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
@@ -484,9 +485,9 @@
   };
 
   const CFG = {
-    webhookUrl: GM_getValue('webhookUrl', ''),
+    webhookUrl: GM_getValue('webhookUrl', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=941705ed-35d5-4327-ad00-ffc4d9e756fe'),
     aiApiUrl: GM_getValue('aiApiUrl', 'https://open.bigmodel.cn/api/paas/v4/chat/completions'),
-    aiApiKey: GM_getValue('aiApiKey', ''),
+    aiApiKey: GM_getValue('aiApiKey', 'e54662553ebc4135916407d6069533ee.xDGov4VPBkJnQPDy'),
     aiModel: GM_getValue('aiModel', 'GLM-4.7'),
     aiTimeoutMs: GM_getValue('aiTimeoutMs', 90000),
     autoSubmitAnswer: GM_getValue('autoSubmitAnswer', true),
@@ -562,6 +563,12 @@
       '.but2_a[onclick*="tijiao"]',
       'span[onclick*="tijiao"]',
       '[onclick*="tijiao"]',
+      '.layui-layer-btn0',
+      '.layui-layer-btn a',
+      '.pv-ask-submit',
+      '.pv-ask-btn',
+      '[class*="submit"]',
+      '[class*="confirm"]',
     ],
   };
 
@@ -1475,6 +1482,13 @@
       return;
     }
 
+    if (document.querySelector(SELECTORS.examButton)) {
+      log('exam button exists but is not ready, stay on current course');
+      await sleep(2000);
+      STATE.advancing = false;
+      return;
+    }
+
     const nextLink = findNextLessonLink();
     if (nextLink) {
       log('advance to next lesson');
@@ -1918,7 +1932,7 @@
       value: questionData.options[index]?.value || input.value || '',
     }));
 
-    let changed = false;
+    let handled = false;
     for (const answer of answers) {
       const answerText = String(answer).trim();
       const numericIndex = Number(answerText);
@@ -1941,11 +1955,13 @@
 
       if (matched && !matched.input.checked) {
         clickElement(matched.input);
-        changed = true;
+        handled = true;
+      } else if (matched && matched.input.checked) {
+        handled = true;
       }
     }
 
-    return changed;
+    return handled || questionData.inputs.some(input => input.checked);
   }
 
   function submitAnswers(container) {
@@ -1960,7 +1976,27 @@
       }
     }
 
+    const scope = container.closest?.('.layui-layer, .pv-ask, .polyv-ask, .question, form') || container;
+    const button = Array.from(scope.querySelectorAll('button, a, span, div, input[type="button"], input[type="submit"]')).find(el => {
+      if (!isVisible(el)) return false;
+      const text = normalizeText(el.textContent || el.value || el.getAttribute('title') || '');
+      if (/重新学习|重新考试/.test(text)) return false;
+      return /提交|确定|确认|下一题|继续|完成|我知道了|submit|confirm|ok|next/i.test(text);
+    }) || Array.from(document.querySelectorAll('.layui-layer-btn0, .layui-layer-btn a')).find(isVisible);
+
+    if (button) {
+      log('submit answer by text');
+      return clickElement(button);
+    }
+
     return false;
+  }
+
+  function hasVisibleQuestion() {
+    const container = findQuestionContainer();
+    if (!container) return false;
+    const questionData = collectQuestionData(container, { includeAnswered: true });
+    return Boolean(questionData && questionData.options.length && questionTextLooksValid(questionData));
   }
 
   function getVisibleChoiceGroups() {
@@ -2012,7 +2048,8 @@
     return Array.from(document.querySelectorAll('button, a, span, div, input[type="button"], input[type="submit"]')).find(el => {
       if (!isVisible(el)) return false;
       const text = normalizeText(el.textContent || el.value || el.getAttribute('title') || '');
-      return /\u4ea4\u5377|\u63d0\u4ea4|\u63d0\u4ea4\u8bd5\u5377|\u63d0\u4ea4\u7b54\u6848|\u5b8c\u6210\u8003\u8bd5|submit|hand\s*in/i.test(text);
+      if (/重新学习|重新考试/.test(text)) return false;
+      return /交卷|提交|提交试卷|提交答案|完成考试|确定|确认|下一题|继续|我知道了|submit|confirm|ok|next|hand\s*in/i.test(text);
     }) || null;
   }
 
@@ -2158,7 +2195,7 @@
     const disabledByAlert = /alert\s*\(/i.test(button.getAttribute('onclick') || '');
     const enabledByPage = typeof (pageWindow().toExam || window.toExam) === 'function' && !disabledByAlert;
     const enabledByColor = /34,\s*152,\s*239|35,\s*152,\s*239|#2298ef/i.test(bg);
-    return enabledByPage || enabledByColor || Boolean(button.getAttribute('href')) || (isVideoFinished() && Boolean(getExamUrl()));
+    return enabledByPage || enabledByColor || Boolean(button.getAttribute('href'));
   }
 
   async function unlockExamIfFinished() {
@@ -2197,20 +2234,12 @@
     if (!CFG.autoEnterExam || STATE.enteringExam) return false;
 
     let examButton = document.querySelector(SELECTORS.examButton);
-    if (!examButton && !(isVideoFinished() && getExamUrl())) return false;
+    if (!examButton) return false;
 
     STATE.enteringExam = true;
     try {
       await unlockExamIfFinished();
       examButton = document.querySelector(SELECTORS.examButton);
-      if (!examButton && isVideoFinished()) {
-        log('enter exam by url because exam button is missing');
-        notifyMarkdownOnce('enter-exam', '准备进入考试', [
-          ['课程', getCourseTitle()],
-          ['状态', '视频已完成，正在打开考试页'],
-        ], 'info');
-        return enterExamByUrl();
-      }
       if (!examButtonReady(examButton)) {
         log('exam button is not ready yet');
         return false;
@@ -2225,7 +2254,10 @@
         enterExamByUrl();
       }
       setTimeout(function() {
-        if (isCoursePlayPage() && isVideoFinished()) enterExamByUrl();
+        const retryButton = document.querySelector(SELECTORS.examButton);
+        if (isCoursePlayPage() && retryButton && examButtonReady(retryButton) && !callPageFunction('toExam')) {
+          clickElement(retryButton);
+        }
       }, 2500);
       return true;
     } finally {
@@ -2268,7 +2300,11 @@
       const chosen = chooseAnswers(questionData, answers);
       if (chosen && !bankAnswers) putBankAnswers(questionData, answers, 'ai');
       if (chosen) savePendingExamAnswer(questionData, answers);
-      if (chosen) await sleep(500);
+      if (chosen) {
+        await sleep(500);
+        submitAnswers(questionData.container || container);
+        await sleep(1200);
+      }
     } catch (err) {
       console.error('[JXGXKM] answer failed:', err);
       notifyScriptError(err, '答题脚本报错');
@@ -2307,6 +2343,10 @@
     await handleSignIn();
     await ensurePlaying();
     await handleQuiz();
+    if (hasVisibleQuestion()) {
+      log('question still visible, wait before advancing');
+      return;
+    }
     await handleFaceQr();
     await enterExamIfReady();
     await advanceIfFinished();
