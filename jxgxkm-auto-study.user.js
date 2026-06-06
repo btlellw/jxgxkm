@@ -687,7 +687,14 @@
     if (fromUrl) return fromUrl;
 
     const w = pageWindow();
-    return w.relation_id || w.course_ware_id || w.cwid || '';
+    if (w.relation_id || w.course_ware_id || w.cwid) return w.relation_id || w.course_ware_id || w.cwid;
+
+    const linkWithCwid = Array.from(document.querySelectorAll('[href*="cwid="], [onclick*="cwid="]')).find(el => {
+      const value = `${el.getAttribute('href') || ''} ${el.getAttribute('onclick') || ''}`;
+      return /cwid=([^'"\s&]+)/i.test(value);
+    });
+    const value = `${linkWithCwid?.getAttribute('href') || ''} ${linkWithCwid?.getAttribute('onclick') || ''}`;
+    return value.match(/cwid=([^'"\s&]+)/i)?.[1] || '';
   }
 
   function formatDuration(seconds) {
@@ -789,8 +796,14 @@
   function isExamPassPage() {
     const text = normalizeText(document.body?.textContent || '');
     return location.pathname.includes('/train/courseware/') &&
-      /\u5df2\u7ecf\u901a\u8fc7\u4e86\u672c\u8bfe\u4ef6\u7684\u8003\u8bd5|\u606d\u559c\u60a8/.test(text) &&
-      /\u7ee7\u7eed\u5b66\u4e60/.test(text);
+      /(已经通过了本课件的考试|通过本课件的考试|恭喜您|考试通过)/.test(text) &&
+      !/(没有通过本课件的考试|未通过本课件的考试|很抱歉)/.test(text);
+  }
+
+  function isExamFailPage() {
+    const text = normalizeText(document.body?.textContent || '');
+    return location.pathname.includes('/train/courseware/') &&
+      /(没有通过本课件的考试|未通过本课件的考试|很抱歉|答错了\s*\d+\s*道题|重新考试)/.test(text);
   }
 
   function requestJson(url, payload, headers = {}, timeoutMs = 30000) {
@@ -903,6 +916,44 @@
       ['时长', course.durationText || formatDuration(getPlayerDuration())],
       ['页面', location.href],
     ], 'info');
+  }
+
+  function notifyExamPassed(savedCount = 0) {
+    const course = readStoredCourseInfo();
+    return notifyMarkdownOnce('exam-passed', '考试通过', [
+      ['课程', course.title || getCourseTitle()],
+      ['题库', savedCount ? `已保存 ${savedCount} 道本次答题答案` : '本次无新增答案'],
+      ['结果', '本次答过的题已视为正确答案'],
+    ], 'info');
+  }
+
+  function getExamFailInfo() {
+    const text = normalizeText(document.body?.textContent || '');
+    const wrongCount = text.match(/答错了\s*(\d+)\s*道题/)?.[1] || '';
+    const scoped = document.querySelectorAll('.kj_f_box ul li, .false .kj_f_box li, .false ul li');
+    const source = scoped.length ? scoped : document.querySelectorAll('.kj_f_box li, .false li');
+    const questions = Array.from(source)
+      .map(el => normalizeText(el.textContent || ''))
+      .filter(value => /\d+\s*[、.．]/.test(value) || /[?？]$/.test(value))
+      .map(value => value.replace(/^\s*/, ''))
+      .slice(0, 5);
+
+    return {
+      wrongCount,
+      questions,
+    };
+  }
+
+  function notifyExamFailed() {
+    const course = readStoredCourseInfo();
+    const info = getExamFailInfo();
+    const fields = [
+      ['课程', course.title || getCourseTitle()],
+      ['结果', info.wrongCount ? `答错 ${info.wrongCount} 道题` : '考试未通过'],
+      ['错题', info.questions.length ? info.questions.join('\n') : '页面未列出错题'],
+      ['动作', '保留本次 pending 答案，不写入正确题库'],
+    ];
+    return notifyMarkdownOnce('exam-failed', '考试未通过', fields, 'warning');
   }
 
   function notifySignInTriggered() {
@@ -2186,6 +2237,7 @@
 
   async function runExamPassPage() {
     const saved = promotePendingExamAnswers();
+    notifyExamPassed(saved);
     if (saved) notify('JXGXKM', `Saved ${saved} passed exam answers.`);
 
     if (!CFG.autoContinueAfterPass || STATE.continuingAfterPass) return;
@@ -2203,6 +2255,10 @@
     }
   }
 
+  async function runExamFailPage() {
+    notifyExamFailed();
+  }
+
   async function tick() {
     try {
 
@@ -2213,6 +2269,11 @@
 
       if (isFaceValidPage()) {
         await runFaceValidPage();
+        return;
+      }
+
+      if (isExamFailPage()) {
+        await runExamFailPage();
         return;
       }
 
